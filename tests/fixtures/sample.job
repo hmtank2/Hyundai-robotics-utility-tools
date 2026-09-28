@@ -1,0 +1,20 @@
+# 재배포 가능한 테스트용 가상 JOB 데이터
+program sample
+wait do31 #로봇 원위치 확인
+do40=0 #전진 OFF
+wait di40 #공통 입력
+if di73==1 #조건 확인
+wait di1
+wait di2
+wait di3
+wait di4
+wait di5
+wait di6
+wait di7
+wait di8
+wait di9
+wait di10
+wait di11
+wait di12
+wait di13
+wait di14
