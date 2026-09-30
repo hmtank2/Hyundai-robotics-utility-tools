@@ -6,6 +6,7 @@ import sys
 import queue
 import threading
 from collections import defaultdict
+from dataclasses import dataclass
 from pathlib import Path
 # Tcl은 DLL 로드 시 환경을 읽으므로 tkinter를 import하기 전에 설정합니다.
 if getattr(sys, 'frozen', False):
@@ -15,11 +16,19 @@ if getattr(sys, 'frozen', False):
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 from job_signal_extractor import collect_files, read_job, parse_text, export_excel
+from job_call_graph import parse_calls, resolve_calls
 
 BG = '#F3F6FA'
 NAVY = '#183F61'
 BLUE = '#2776BF'
 TEAL = '#168779'
+ORANGE = '#B96A16'
+
+
+@dataclass(frozen=True)
+class GraphNeighbor:
+    node: tuple[str, str]
+    relation: str
 
 
 class Explorer(tk.Tk):
@@ -38,6 +47,10 @@ class Explorer(tk.Tk):
         self.signals = []
         self.by_signal = defaultdict(list)
         self.by_file = defaultdict(list)
+        self.call_links = []
+        self.calls_out = defaultdict(list)
+        self.calls_in = defaultdict(list)
+        self.call_rows = []
         self.focus_node = None
         self.graph_page = 0
         self.busy = False
@@ -99,7 +112,7 @@ class Explorer(tk.Tk):
         tabs.add(sig_frame, text='신호 목록')
         tabs.add(file_frame, text='프로그램 목록')
         self.signal_tree = self.tree(sig_frame, [('name','신호',80),('count','출현',55),('files','파일',55)])
-        self.file_tree = self.tree(file_frame, [('name','JOB 파일',170),('count','출현',55)])
+        self.file_tree = self.tree(file_frame, [('name','JOB 파일',170),('count','신호',55),('calls','호출',55)])
         self.signal_tree.bind('<<TreeviewSelect>>', self.select_signal)
         self.file_tree.bind('<<TreeviewSelect>>', self.select_file)
         ttk.Label(left, text='검색: 신호 · 주석 · 파일 경로\n선택한 모든 파일을 엑셀로 저장합니다.', foreground='#62758A').pack(anchor='w', pady=10)
@@ -111,15 +124,19 @@ class Explorer(tk.Tk):
         ttk.Label(top, textvariable=self.node_title, font=('맑은 고딕', 12, 'bold')).pack(anchor='w')
         notebook = ttk.Notebook(top)
         notebook.pack(fill='both', expand=True, pady=(8, 0))
-        detail_frame, graph_frame = ttk.Frame(notebook), ttk.Frame(notebook)
+        detail_frame, call_frame, graph_frame = ttk.Frame(notebook), ttk.Frame(notebook), ttk.Frame(notebook)
         notebook.add(detail_frame, text='주석 / 사용 내역 ↗')
+        notebook.add(call_frame, text='JOB 호출 내역 ↗')
         notebook.add(graph_frame, text='연결 그래프')
         self.details = self.tree(detail_frame, [('signal','신호',75),('comment','주석 — 클릭하여 원본 보기',300),('file','프로그램',160),('line','줄',55),('code','명령문',260)])
         self.details.tag_configure('link', foreground='#1765B2')
         self.details.bind('<<TreeviewSelect>>', self.select_occurrence)
+        self.call_details = self.tree(call_frame, [('direction','관계',75),('caller','호출한 JOB',170),('target','대상 JOB',170),('line','줄',55),('status','상태',105),('comment','주석',250)])
+        self.call_details.tag_configure('link', foreground='#1765B2')
+        self.call_details.bind('<<TreeviewSelect>>', self.select_call)
         tools = ttk.Frame(graph_frame)
         tools.pack(fill='x')
-        ttk.Label(tools, text='파랑: DI  /  초록: DO  /  남색: JOB  ·  노드를 클릭해 연결 따라가기').pack(side='left')
+        ttk.Label(tools, text='파랑: DI  /  초록: DO  /  남색: JOB  /  주황: 확인 필요 CALL  ·  화살표: 호출 방향').pack(side='left')
         ttk.Button(tools, text='다음 ›', command=lambda: self.page(1)).pack(side='right')
         ttk.Button(tools, text='‹ 이전', command=lambda: self.page(-1)).pack(side='right')
         self.graph_info = tk.StringVar()
@@ -221,8 +238,16 @@ class Explorer(tk.Tk):
         for signal in self.signals:
             self.by_signal[signal.name].append(signal)
             self.by_file[signal.file].append(signal)
+        calls = [call for path in sorted(self.documents)
+                 for call in parse_calls(self.documents[path][0], path)]
+        self.call_links = resolve_calls(calls, list(self.documents))
+        self.calls_out, self.calls_in = defaultdict(list), defaultdict(list)
+        for link in self.call_links:
+            self.calls_out[link.call.source].append(link)
+            if link.target_path is not None:
+                self.calls_in[link.target_path].append(link)
         self.refresh_list()
-        self.status.set(f'파일 {len(self.documents):,}개   ·   신호 {len(self.by_signal):,}개   ·   사용 내역 {len(self.signals):,}건   |   원본은 불러온 시점의 읽기 전용 내용입니다.')
+        self.status.set(f'파일 {len(self.documents):,}개   ·   신호 {len(self.by_signal):,}개   ·   사용 내역 {len(self.signals):,}건   ·   JOB 호출 {len(self.call_links):,}건   |   원본은 불러온 시점의 읽기 전용 내용입니다.')
         if self.by_signal:
             name = sorted(self.by_signal, key=lambda s:(s[:2],int(s[2:])))[0]
             self.show_node(('signal', name))
@@ -243,10 +268,12 @@ class Explorer(tk.Tk):
             self.signal_tree.insert('', 'end', iid=name, values=(name,len(rows),len({s.file for s in rows})))
         self.file_ids = {}
         for n, path in enumerate(sorted(self.documents)):
-            if query and query not in path.casefold() and not any(query in f'{s.name} {s.comment}'.casefold() for s in self.by_file[path]):
+            if (query and query not in path.casefold()
+                    and not any(query in f'{s.name} {s.comment}'.casefold() for s in self.by_file[path])
+                    and not any(query in f'{link.call.target} {link.call.comment}'.casefold() for link in self.calls_out[path])):
                 continue
             self.file_ids[str(n)] = path
-            self.file_tree.insert('', 'end', iid=str(n), values=(Path(path).name,len(self.by_file[path])))
+            self.file_tree.insert('', 'end', iid=str(n), values=(Path(path).name,len(self.by_file[path]),len(self.calls_out[path])))
 
     def select_signal(self, _=None):
         selection = self.signal_tree.selection()
@@ -262,10 +289,24 @@ class Explorer(tk.Tk):
         self.focus_node, self.graph_page = node, 0
         kind, key = node
         self.current_rows = self.by_signal[key] if kind == 'signal' else self.by_file[key]
-        self.node_title.set(f'{key}   ·   사용 내역 {len(self.current_rows)}건')
+        if kind == 'file':
+            self.node_title.set(f'{key}   ·   신호 {len(self.current_rows)}건   ·   호출 {len(self.calls_out[key])}건   ·   호출됨 {len(self.calls_in[key])}건')
+        else:
+            self.node_title.set(f'{key}   ·   사용 내역 {len(self.current_rows)}건')
         self.details.delete(*self.details.get_children())
         for i, s in enumerate(self.current_rows):
             self.details.insert('', 'end', iid=str(i), values=(s.name,s.comment or '(주석 없음)',Path(s.file).name,s.line,s.code), tags=('link',))
+        self.call_details.delete(*self.call_details.get_children())
+        self.call_rows = []
+        if kind == 'file':
+            self.call_rows.extend(('호출', link) for link in self.calls_out[key])
+            self.call_rows.extend(('호출됨', link) for link in self.calls_in[key] if link.call.source != key)
+            for i, (direction, link) in enumerate(self.call_rows):
+                status = {'resolved': '연결됨', 'missing': '미로드', 'ambiguous': '동명이인'}[link.status]
+                target = Path(link.target_path).name if link.target_path else f'{link.call.target}.job'
+                self.call_details.insert('', 'end', iid=str(i),
+                                         values=(direction, Path(link.call.source).name, target,
+                                                 link.call.line, status, link.call.comment), tags=('link',))
         if self.current_rows:
             self.details.selection_set('0')
             self.show_source(self.current_rows[0].file, self.current_rows[0].line)
@@ -278,6 +319,12 @@ class Explorer(tk.Tk):
         if selected:
             s = self.current_rows[int(selected[0])]
             self.show_source(s.file, s.line)
+
+    def select_call(self, _=None):
+        selected = self.call_details.selection()
+        if selected:
+            link = self.call_rows[int(selected[0])][1]
+            self.show_source(link.call.source, link.call.line)
 
     def show_source(self, path, line):
         text, encoding, _ = self.documents[path]
@@ -295,8 +342,24 @@ class Explorer(tk.Tk):
             return []
         kind, key = self.focus_node
         if kind == 'signal':
-            return [('file',p) for p in sorted({s.file for s in self.by_signal[key]})]
-        return [('signal',n) for n in sorted({s.name for s in self.by_file[key]}, key=lambda s:(s[:2],int(s[2:])))]
+            return [GraphNeighbor(('file',p), 'signal') for p in sorted({s.file for s in self.by_signal[key]})]
+        neighbors = []
+        directions = defaultdict(set)
+        for link in self.calls_out[key]:
+            if link.target_path is not None:
+                directions[link.target_path].add('out')
+        for link in self.calls_in[key]:
+            directions[link.call.source].add('in')
+        for path, kinds in sorted(directions.items(), key=lambda item: item[0].casefold()):
+            relation = 'both' if len(kinds) == 2 else next(iter(kinds))
+            neighbors.append(GraphNeighbor(('self' if path == key else 'file', path), relation))
+        unresolved = {(link.call.target, link.status) for link in self.calls_out[key]
+                      if link.target_path is None}
+        neighbors.extend(GraphNeighbor((status, target), status)
+                         for target, status in sorted(unresolved))
+        neighbors.extend(GraphNeighbor(('signal',n), 'signal')
+                         for n in sorted({s.name for s in self.by_file[key]}, key=lambda s:(s[:2],int(s[2:]))))
+        return neighbors
 
     def page(self, delta):
         pages = max(1, math.ceil(len(self.neighbors()) / 16))
@@ -313,35 +376,49 @@ class Explorer(tk.Tk):
         w,h = max(self.canvas.winfo_width(),600), max(self.canvas.winfo_height(),260)
         cx,cy = w/2,h/2
         positions = []
-        for i,node in enumerate(page_nodes):
+        for i,neighbor in enumerate(page_nodes):
             angle = 2*math.pi*i/max(1,len(page_nodes)) - math.pi/2
             x,y = cx + max(180,w/2-125)*math.cos(angle), cy + max(70,h/2-40)*math.sin(angle)
-            self.canvas.create_line(cx,cy,x,y,fill='#BED0DF',width=2)
-            positions.append((node,x,y))
+            relation = neighbor.relation
+            arrow = {'out': 'last', 'in': 'first', 'both': 'both',
+                     'missing': 'last', 'ambiguous': 'last'}.get(relation, 'none')
+            color = ORANGE if relation in ('missing', 'ambiguous') else '#6595B7' if relation != 'signal' else '#BED0DF'
+            self.canvas.create_line(cx,cy,x,y,fill=color,width=2,arrow=arrow,
+                                    dash=(5, 3) if relation in ('missing', 'ambiguous') else ())
+            positions.append((neighbor.node,x,y))
         self.draw_node(self.focus_node,cx,cy,True)
         for node,x,y in positions:
             self.draw_node(node,x,y)
 
     def draw_node(self,node,x,y,center=False):
         kind,key = node
-        label = Path(key).name if kind == 'file' else key
-        color = NAVY if kind == 'file' else BLUE if key.startswith('DI') else TEAL
+        label = (Path(key).name + (' (자기 호출)' if kind == 'self' else '')
+                 if kind in ('file', 'self') else f'{key}.job ({"미로드" if kind == "missing" else "동명이인"})'
+                 if kind in ('missing', 'ambiguous') else key)
+        color = NAVY if kind in ('file', 'self') else ORANGE if kind in ('missing', 'ambiguous') else BLUE if key.startswith('DI') else TEAL
         radius = 18 if center else 9
         tag = f'node{len(self.canvas.find_all())}'
         self.canvas.create_oval(x-radius,y-radius,x+radius,y+radius,fill=color,outline='white',width=2,tags=tag)
         self.canvas.create_text(x,y+radius+12,text=label if len(label)<28 else label[:25]+'…',fill=NAVY,font=('맑은 고딕',10,'bold' if center else 'normal'),tags=tag)
-        self.canvas.tag_bind(tag,'<Button-1>',lambda _,n=node:self.show_node(n))
-        self.canvas.tag_bind(tag,'<Enter>',lambda _:self.canvas.configure(cursor='hand2'))
-        self.canvas.tag_bind(tag,'<Leave>',lambda _:self.canvas.configure(cursor=''))
+        if kind not in ('missing', 'ambiguous'):
+            destination = ('file', key) if kind == 'self' else node
+            self.canvas.tag_bind(tag,'<Button-1>',lambda _,n=destination:self.show_node(n))
+            self.canvas.tag_bind(tag,'<Enter>',lambda _:self.canvas.configure(cursor='hand2'))
+            self.canvas.tag_bind(tag,'<Leave>',lambda _:self.canvas.configure(cursor=''))
 
     def clear(self):
         self.documents.clear()
         self.signals.clear()
         self.by_signal.clear()
         self.by_file.clear()
+        self.call_links.clear()
+        self.calls_out.clear()
+        self.calls_in.clear()
+        self.call_rows.clear()
         self.focus_node = None
         self.refresh_list()
         self.details.delete(*self.details.get_children())
+        self.call_details.delete(*self.call_details.get_children())
         self.source.configure(state='normal')
         self.source.delete('1.0','end')
         self.source.configure(state='disabled')
@@ -382,18 +459,27 @@ if __name__ == '__main__':
         try:
             app = Explorer()
             app.withdraw()
-            text, encoding = read_job(sample)
             key = str(sample)
-            rows = parse_text(text, key)
-            app.documents[key] = (text, encoding, rows)
+            for path in sorted(sample.parent.glob('*.job')):
+                path_key = str(path.resolve())
+                contents, file_encoding = read_job(path)
+                app.documents[path_key] = (contents, file_encoding, parse_text(contents, path_key))
+            text, encoding, rows = app.documents[key]
             app.reindex()
             app.update()
             app.show_node(('file', key))
             if rows:
                 app.show_source(key, rows[0].line)
                 assert app.source.tag_ranges('target')
+            elif app.calls_out[key]:
+                app.call_details.selection_set('0')
+                app.select_call()
+                assert app.source.tag_ranges('target')
             export_excel(rows, [(sample.name,key,encoding,len(rows))], report.with_suffix('.xlsx'), {key:text})
-            report.write_text(json.dumps({'ok':True,'occurrences':len(rows),'signals':len(app.by_signal),'graph_connections':len(app.neighbors())}),encoding='utf-8')
+            report.write_text(json.dumps({'ok':True,'occurrences':len(rows),'signals':len(app.by_signal),
+                                          'graph_connections':len(app.neighbors()),
+                                          'calls':len(app.call_links),
+                                          'resolved_calls':sum(link.target_path is not None for link in app.call_links)}),encoding='utf-8')
         except Exception:
             import traceback
             report.write_text(traceback.format_exc(),encoding='utf-8')

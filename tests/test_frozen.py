@@ -28,9 +28,26 @@ class FrozenTests(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertEqual(
                 json.loads(report.read_text(encoding='utf-8')),
-                {'ok': True, 'occurrences': 18, 'signals': 18, 'graph_connections': 18},
+                {'ok': True, 'occurrences': 18, 'signals': 18, 'graph_connections': 18,
+                 'calls': 0, 'resolved_calls': 0},
             )
             self.assertTrue(report.with_suffix('.xlsx').is_file())
+
+    @unittest.skipUnless(EXE.is_file(), 'Build the EXE first with packaging/JOB_Signal_Explorer.spec')
+    def test_call_graph_self_test(self):
+        sample = SAMPLE.parent / 'calls' / 'main.job'
+        with tempfile.TemporaryDirectory() as folder:
+            report = Path(folder) / 'calls.json'
+            result = subprocess.run(
+                [str(EXE), '--self-test', str(sample), str(report)],
+                cwd=folder, timeout=50, capture_output=True, text=True,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(
+                json.loads(report.read_text(encoding='utf-8')),
+                {'ok': True, 'occurrences': 0, 'signals': 1, 'graph_connections': 3,
+                 'calls': 4, 'resolved_calls': 3},
+            )
 
 
 if __name__ == '__main__':
