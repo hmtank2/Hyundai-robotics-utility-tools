@@ -14,6 +14,37 @@ from job_signal_viewer import Explorer
 
 
 class ViewerTests(unittest.TestCase):
+    def test_job_call_graph_and_source_jump(self):
+        folder = Path(__file__).resolve().parent / 'fixtures' / 'calls'
+        app = Explorer()
+        app.withdraw()
+        try:
+            for path in sorted(folder.glob('*.job')):
+                text, encoding = read_job(path)
+                key = str(path.resolve())
+                app.documents[key] = (text, encoding, parse_text(text, key))
+            app.reindex()
+            app.update()
+            main = str((folder / 'main.job').resolve())
+            target = str((folder / '9250.job').resolve())
+            app.show_node(('file', main))
+            self.assertEqual(len(app.by_file[main]), 0)
+            self.assertEqual(len(app.calls_out[main]), 3)
+            self.assertEqual(len(app.neighbors()), 3)
+            self.assertEqual({neighbor.relation for neighbor in app.neighbors()}, {'out', 'missing'})
+            self.assertEqual(len(app.call_details.get_children()), 3)
+            app.call_details.selection_set('0')
+            app.select_call()
+            self.assertIn('2행', app.source_title.get())
+            self.assertTrue(app.source.tag_ranges('target'))
+            app.show_node(('file', target))
+            self.assertEqual(len(app.calls_in[target]), 2)
+            self.assertEqual(len(app.neighbors()), 3)  # DI40 plus two calling JOBs
+        finally:
+            for callback in app.tk.call('after', 'info'):
+                app.after_cancel(callback)
+            app.destroy()
+
     def test_navigation_and_export(self):
         app = Explorer()
         app.withdraw()
