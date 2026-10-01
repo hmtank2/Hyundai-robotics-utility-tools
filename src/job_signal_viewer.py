@@ -15,7 +15,8 @@ if getattr(sys, 'frozen', False):
     os.environ['TK_LIBRARY'] = './_tk_data'
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
-from job_signal_extractor import collect_files, read_job, parse_text, export_excel
+from job_core import collect_files, read_job
+from job_signal_extractor import parse_text, export_excel
 from job_call_graph import parse_calls, resolve_calls
 
 BG = '#F3F6FA'

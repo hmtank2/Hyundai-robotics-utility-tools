@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 import re
 
-from job_signal_extractor import split_line
+from job_core import split_line
 
 
 CALL_RE = re.compile(r"(?<![\w.])call[ \t]+(?P<target>[0-9]+)(?![\w.])", re.I)
