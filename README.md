@@ -35,7 +35,8 @@ py -m venv .venv
 
 | 위치 | 내용 |
 | --- | --- |
-| `src/` | GUI와 추출기 소스 |
+| `src/job_core/` | GUI와 Excel에 의존하지 않는 JOB 파일 읽기·줄 처리 |
+| `src/` | GUI, 신호·CALL 분석, 추출기 소스 |
 | `tests/fixtures/` | 공개 가능한 가상 JOB 테스트 데이터 |
 | `tests/` | 추출, 화면, 작업 흐름, EXE 검사 |
 | `packaging/` | PyInstaller 설정, Tcl/Tk 훅, 배포 스크립트 |
