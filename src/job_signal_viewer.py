@@ -18,12 +18,15 @@ from tkinter import ttk, filedialog, messagebox
 from job_core import collect_files, read_job
 from job_signal_extractor import parse_text, export_excel
 from job_call_graph import parse_calls, resolve_calls
+from graph_motion import GraphPoint, advance
 
-BG = '#F3F6FA'
-NAVY = '#183F61'
-BLUE = '#2776BF'
-TEAL = '#168779'
-ORANGE = '#B96A16'
+BG = '#EAF0F5'
+CARD = '#FFFFFF'
+NAVY = '#142C46'
+BLUE = '#2474C7'
+TEAL = '#0F9B8E'
+ORANGE = '#D88738'
+MUTED = '#64788C'
 
 
 @dataclass(frozen=True)
@@ -54,6 +57,13 @@ class Explorer(tk.Tk):
         self.call_rows = []
         self.focus_node = None
         self.graph_page = 0
+        self.graph_nodes = []
+        self.graph_points = []
+        self.graph_hover = None
+        self.graph_drag = None
+        self.graph_press = None
+        self.graph_pointer = None
+        self.graph_timer = None
         self.busy = False
         self.events = queue.Queue()
         self.search = tk.StringVar()
@@ -72,20 +82,32 @@ class Explorer(tk.Tk):
         style.theme_use('clam')
         style.configure('.', font=('맑은 고딕', 10))
         style.configure('TFrame', background=BG)
+        style.configure('Card.TFrame', background=CARD)
         style.configure('TLabel', background=BG, foreground=NAVY)
-        style.configure('TButton', padding=(12, 8))
-        style.configure('Primary.TButton', background=NAVY, foreground='white')
-        style.map('Primary.TButton', background=[('active', BLUE)])
-        style.configure('Treeview', rowheight=30, background='white', fieldbackground='white')
-        style.configure('Treeview.Heading', font=('맑은 고딕', 10, 'bold'), padding=6)
-        style.map('Treeview', background=[('selected', '#D9EAF8')], foreground=[('selected', NAVY)])
+        style.configure('Card.TLabel', background=CARD, foreground=NAVY)
+        style.configure('Muted.TLabel', background=CARD, foreground=MUTED)
+        style.configure('TButton', padding=(13, 9), background=CARD, foreground=NAVY,
+                        borderwidth=1, relief='flat')
+        style.map('TButton', background=[('active', '#DCEAF6')])
+        style.configure('Primary.TButton', background=BLUE, foreground='white')
+        style.map('Primary.TButton', background=[('active', '#185EAA'), ('disabled', '#91A6BA')])
+        style.configure('TEntry', padding=8)
+        style.configure('TCombobox', padding=6)
+        style.configure('TNotebook', background=CARD, borderwidth=0)
+        style.configure('TNotebook.Tab', padding=(17, 10), background='#E9F0F6', foreground=MUTED)
+        style.map('TNotebook.Tab', background=[('selected', CARD)], foreground=[('selected', NAVY)])
+        style.configure('Treeview', rowheight=32, background=CARD, fieldbackground=CARD,
+                        foreground=NAVY, borderwidth=0)
+        style.configure('Treeview.Heading', font=('맑은 고딕', 10, 'bold'), padding=8,
+                        background='#E9F0F6', foreground=NAVY, relief='flat')
+        style.map('Treeview', background=[('selected', '#DCEBFA')], foreground=[('selected', NAVY)])
 
     def _build(self):
-        header = tk.Frame(self, bg=NAVY, padx=20, pady=15)
+        header = tk.Frame(self, bg=NAVY, padx=24, pady=17)
         header.pack(fill='x')
         tk.Label(header, text='JOB Signal Explorer', font=('Segoe UI', 21, 'bold'), bg=NAVY, fg='white').pack(side='left')
-        tk.Label(header, text='신호 · 프로그램 · 원본 주석', font=('맑은 고딕', 11), bg=NAVY, fg='#C4D9EB').pack(side='right')
-        bar = ttk.Frame(self, padding=(16, 12))
+        tk.Label(header, text='SIGNALS  /  CALLS  /  SOURCE', font=('Segoe UI', 10, 'bold'), bg=NAVY, fg='#8FBDD9').pack(side='right')
+        bar = ttk.Frame(self, padding=(20, 14))
         bar.pack(fill='x')
         self.add_button = ttk.Button(bar, text='＋ JOB 파일 추가', command=self.pick_files, style='Primary.TButton')
         self.add_button.pack(side='left', padx=(0, 8))
@@ -99,10 +121,11 @@ class Explorer(tk.Tk):
         self.export_button.pack(side='right')
 
         main = ttk.Panedwindow(self, orient='horizontal')
-        main.pack(fill='both', expand=True, padx=16)
-        left = ttk.Frame(main, padding=8)
+        main.pack(fill='both', expand=True, padx=18, pady=(0, 12))
+        left = ttk.Frame(main, padding=16, style='Card.TFrame')
         main.add(left, weight=1)
-        ttk.Label(left, text='신호 / 파일 찾기', font=('맑은 고딕', 12, 'bold')).pack(anchor='w', pady=(0, 8))
+        ttk.Label(left, text='탐색', style='Card.TLabel', font=('맑은 고딕', 14, 'bold')).pack(anchor='w', pady=(0, 4))
+        ttk.Label(left, text='신호와 JOB 파일을 빠르게 찾으세요', style='Muted.TLabel').pack(anchor='w', pady=(0, 12))
         ttk.Entry(left, textvariable=self.search).pack(fill='x', pady=(0, 8))
         types = ttk.Combobox(left, textvariable=self.kind, values=['전체', 'DI', 'DO'], state='readonly', width=10)
         types.pack(anchor='w', pady=(0, 8))
@@ -116,13 +139,13 @@ class Explorer(tk.Tk):
         self.file_tree = self.tree(file_frame, [('name','JOB 파일',170),('count','신호',55),('calls','호출',55)])
         self.signal_tree.bind('<<TreeviewSelect>>', self.select_signal)
         self.file_tree.bind('<<TreeviewSelect>>', self.select_file)
-        ttk.Label(left, text='검색: 신호 · 주석 · 파일 경로\n선택한 모든 파일을 엑셀로 저장합니다.', foreground='#62758A').pack(anchor='w', pady=10)
+        ttk.Label(left, text='신호 · 주석 · 파일 경로 검색\n불러온 파일은 엑셀로 저장할 수 있습니다.', style='Muted.TLabel').pack(anchor='w', pady=10)
 
         right = ttk.Panedwindow(main, orient='vertical')
         main.add(right, weight=4)
-        top = ttk.Frame(right, padding=8)
+        top = ttk.Frame(right, padding=16, style='Card.TFrame')
         right.add(top, weight=3)
-        ttk.Label(top, textvariable=self.node_title, font=('맑은 고딕', 12, 'bold')).pack(anchor='w')
+        ttk.Label(top, textvariable=self.node_title, style='Card.TLabel', font=('맑은 고딕', 12, 'bold')).pack(anchor='w')
         notebook = ttk.Notebook(top)
         notebook.pack(fill='both', expand=True, pady=(8, 0))
         detail_frame, call_frame, graph_frame = ttk.Frame(notebook), ttk.Frame(notebook), ttk.Frame(notebook)
@@ -137,19 +160,24 @@ class Explorer(tk.Tk):
         self.call_details.bind('<<TreeviewSelect>>', self.select_call)
         tools = ttk.Frame(graph_frame)
         tools.pack(fill='x')
-        ttk.Label(tools, text='파랑: DI  /  초록: DO  /  남색: JOB  /  주황: 확인 필요 CALL  ·  화살표: 호출 방향').pack(side='left')
+        ttk.Label(tools, text='● DI   ● DO   ● JOB   ● 확인 필요 CALL    ·    마우스로 노드를 움직이세요', foreground=MUTED).pack(side='left')
         ttk.Button(tools, text='다음 ›', command=lambda: self.page(1)).pack(side='right')
         ttk.Button(tools, text='‹ 이전', command=lambda: self.page(-1)).pack(side='right')
         self.graph_info = tk.StringVar()
         ttk.Label(graph_frame, textvariable=self.graph_info).pack(anchor='w')
-        self.canvas = tk.Canvas(graph_frame, bg='#FAFCFE', highlightthickness=0, height=270)
+        self.canvas = tk.Canvas(graph_frame, bg='#F7FAFD', highlightthickness=0, height=320)
         self.canvas.pack(fill='both', expand=True)
         self.canvas.bind('<Configure>', lambda _: self.draw_graph())
+        self.canvas.bind('<Motion>', self.graph_motion)
+        self.canvas.bind('<Leave>', self.graph_leave)
+        self.canvas.bind('<ButtonPress-1>', self.graph_press_node)
+        self.canvas.bind('<B1-Motion>', self.graph_drag_node)
+        self.canvas.bind('<ButtonRelease-1>', self.graph_release_node)
 
-        bottom = ttk.Frame(right, padding=8)
+        bottom = ttk.Frame(right, padding=16, style='Card.TFrame')
         right.add(bottom, weight=2)
-        ttk.Label(bottom, text='원본 텍스트', font=('맑은 고딕', 12, 'bold')).pack(anchor='w')
-        ttk.Label(bottom, textvariable=self.source_title, wraplength=950).pack(anchor='w', pady=(4, 8))
+        ttk.Label(bottom, text='원본 텍스트', style='Card.TLabel', font=('맑은 고딕', 12, 'bold')).pack(anchor='w')
+        ttk.Label(bottom, textvariable=self.source_title, style='Muted.TLabel', wraplength=950).pack(anchor='w', pady=(4, 8))
         text_frame = ttk.Frame(bottom)
         text_frame.pack(fill='both', expand=True)
         self.source = tk.Text(text_frame, wrap='none', font=('Consolas', 11), bg='#10283E', fg='#D9E7F1',
@@ -161,7 +189,7 @@ class Explorer(tk.Tk):
         sx.pack(side='bottom', fill='x')
         self.source.pack(fill='both', expand=True)
         self.source.tag_configure('target', background='#805E13', foreground='#FFFFFF')
-        ttk.Label(self, textvariable=self.status, padding=(22, 10)).pack(fill='x')
+        ttk.Label(self, textvariable=self.status, padding=(22, 10), foreground=MUTED).pack(fill='x')
 
     @staticmethod
     def tree(parent, columns):
@@ -368,46 +396,133 @@ class Explorer(tk.Tk):
         self.draw_graph()
 
     def draw_graph(self):
-        self.canvas.delete('all')
+        self.stop_graph_animation()
+        self.graph_nodes = []
+        self.graph_points = []
+        self.graph_hover = self.graph_drag = self.graph_press = self.graph_pointer = None
         if not self.focus_node:
+            self.canvas.delete('all')
             return
         nodes = self.neighbors()
         page_nodes = nodes[self.graph_page*16:(self.graph_page+1)*16]
-        self.graph_info.set(f'연결 {len(nodes)}개 · {self.graph_page+1}/{max(1, math.ceil(len(nodes)/16))} 페이지 · 한 페이지 최대 16개')
+        self.graph_info.set(f'연결 {len(nodes)}개 · {self.graph_page+1}/{max(1, math.ceil(len(nodes)/16))} 페이지 · 클릭: 탐색 / 드래그: 이동')
         w,h = max(self.canvas.winfo_width(),600), max(self.canvas.winfo_height(),260)
         cx,cy = w/2,h/2
-        positions = []
+        self.graph_nodes.append(GraphNeighbor(self.focus_node, 'center'))
+        self.graph_points.append(GraphPoint(cx, cy, cx, cy))
         for i,neighbor in enumerate(page_nodes):
             angle = 2*math.pi*i/max(1,len(page_nodes)) - math.pi/2
-            x,y = cx + max(180,w/2-125)*math.cos(angle), cy + max(70,h/2-40)*math.sin(angle)
+            x,y = cx + max(140,w/2-135)*math.cos(angle), cy + max(75,h/2-55)*math.sin(angle)
+            self.graph_nodes.append(neighbor)
+            self.graph_points.append(GraphPoint(x, y, x, y))
+        self.paint_graph()
+
+    def paint_graph(self):
+        self.canvas.delete('all')
+        if not self.graph_points:
+            return
+        center = self.graph_points[0]
+        for neighbor, point in zip(self.graph_nodes[1:], self.graph_points[1:]):
             relation = neighbor.relation
             arrow = {'out': 'last', 'in': 'first', 'both': 'both',
                      'missing': 'last', 'ambiguous': 'last'}.get(relation, 'none')
-            color = ORANGE if relation in ('missing', 'ambiguous') else '#6595B7' if relation != 'signal' else '#BED0DF'
-            self.canvas.create_line(cx,cy,x,y,fill=color,width=2,arrow=arrow,
+            color = ORANGE if relation in ('missing', 'ambiguous') else '#8BAFCB' if relation != 'signal' else '#C3D5E3'
+            self.canvas.create_line(center.x,center.y,point.x,point.y,fill=color,width=2,arrow=arrow,
                                     dash=(5, 3) if relation in ('missing', 'ambiguous') else ())
-            positions.append((neighbor.node,x,y))
-        self.draw_node(self.focus_node,cx,cy,True)
-        for node,x,y in positions:
-            self.draw_node(node,x,y)
+        for index, (neighbor, point) in enumerate(zip(self.graph_nodes, self.graph_points)):
+            self.draw_node(neighbor.node, point, index)
 
-    def draw_node(self,node,x,y,center=False):
+    def draw_node(self,node,point,index):
         kind,key = node
         label = (Path(key).name + (' (자기 호출)' if kind == 'self' else '')
                  if kind in ('file', 'self') else f'{key}.job ({"미로드" if kind == "missing" else "동명이인"})'
                  if kind in ('missing', 'ambiguous') else key)
         color = NAVY if kind in ('file', 'self') else ORANGE if kind in ('missing', 'ambiguous') else BLUE if key.startswith('DI') else TEAL
-        radius = 18 if center else 9
-        tag = f'node{len(self.canvas.find_all())}'
-        self.canvas.create_oval(x-radius,y-radius,x+radius,y+radius,fill=color,outline='white',width=2,tags=tag)
-        self.canvas.create_text(x,y+radius+12,text=label if len(label)<28 else label[:25]+'…',fill=NAVY,font=('맑은 고딕',10,'bold' if center else 'normal'),tags=tag)
-        if kind not in ('missing', 'ambiguous'):
-            destination = ('file', key) if kind == 'self' else node
-            self.canvas.tag_bind(tag,'<Button-1>',lambda _,n=destination:self.show_node(n))
-            self.canvas.tag_bind(tag,'<Enter>',lambda _:self.canvas.configure(cursor='hand2'))
-            self.canvas.tag_bind(tag,'<Leave>',lambda _:self.canvas.configure(cursor=''))
+        radius = (19 if index == 0 else 11) * point.scale
+        tag = f'node-{index}'
+        self.canvas.create_oval(point.x-radius-3,point.y-radius-3,point.x+radius+3,point.y+radius+3,
+                                fill='#DCE8F2',outline='',tags=tag)
+        self.canvas.create_oval(point.x-radius,point.y-radius,point.x+radius,point.y+radius,
+                                fill=color,outline=CARD,width=2,tags=tag)
+        self.canvas.create_text(point.x,point.y+radius+16,text=label if len(label)<28 else label[:25]+'…',
+                                fill=NAVY,font=('맑은 고딕',10,'bold' if index == 0 or index == self.graph_hover else 'normal'),tags=tag)
+
+    def graph_hit(self):
+        for item in self.canvas.find_withtag('current'):
+            for tag in self.canvas.gettags(item):
+                if tag.startswith('node-'):
+                    return int(tag[5:])
+        return None
+
+    def graph_motion(self, event):
+        if self.graph_drag is not None:
+            return
+        self.graph_pointer = (event.x, event.y)
+        hover = self.graph_hit()
+        if hover != self.graph_hover:
+            self.graph_hover = hover
+            self.canvas.configure(cursor='hand2' if hover is not None else '')
+        if hover is not None:
+            self.start_graph_animation()
+
+    def graph_leave(self, _event):
+        if self.graph_drag is None:
+            self.graph_hover = self.graph_pointer = None
+            self.canvas.configure(cursor='')
+            self.start_graph_animation()
+
+    def graph_press_node(self, event):
+        self.graph_drag = self.graph_hit()
+        self.graph_press = (event.x, event.y) if self.graph_drag is not None else None
+        self.graph_moved = False
+
+    def graph_drag_node(self, event):
+        if self.graph_drag is None:
+            return
+        point = self.graph_points[self.graph_drag]
+        if math.hypot(event.x-self.graph_press[0], event.y-self.graph_press[1]) > 4:
+            self.graph_moved = True
+        point.x = min(max(event.x, 28), max(28, self.canvas.winfo_width()-28))
+        point.y = min(max(event.y, 28), max(28, self.canvas.winfo_height()-44))
+        self.graph_pointer = (point.x, point.y)
+        self.paint_graph()
+        self.start_graph_animation()
+
+    def graph_release_node(self, _event):
+        index = self.graph_drag
+        if index is None:
+            return
+        self.graph_drag = self.graph_press = None
+        if self.graph_moved:
+            point = self.graph_points[index]
+            point.anchor_x, point.anchor_y = point.x, point.y
+            self.graph_hover = self.graph_pointer = None
+            self.start_graph_animation()
+        elif index < len(self.graph_nodes):
+            node = self.graph_nodes[index].node
+            if node[0] not in ('missing', 'ambiguous'):
+                self.show_node(('file',node[1]) if node[0] == 'self' else node)
+
+    def start_graph_animation(self):
+        if self.graph_timer is None and self.graph_points:
+            self.graph_timer = self.after(33, self.animate_graph)
+
+    def stop_graph_animation(self):
+        if self.graph_timer is not None:
+            self.after_cancel(self.graph_timer)
+            self.graph_timer = None
+
+    def animate_graph(self):
+        self.graph_timer = None
+        moving = advance(self.graph_points, self.graph_hover, self.graph_drag, self.graph_pointer)
+        self.paint_graph()
+        if moving:
+            self.start_graph_animation()
 
     def clear(self):
+        self.stop_graph_animation()
+        self.graph_nodes = []
+        self.graph_points = []
         self.documents.clear()
         self.signals.clear()
         self.by_signal.clear()
